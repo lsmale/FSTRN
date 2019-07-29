@@ -1,0 +1,112 @@
+clear;clc;
+video_dir_path = '../videos';
+video_size = [176 144];
+dim_s = video_size(1) * video_size(2) * 3 / 2;
+size_spa=144;  % spatial size
+stride_spa=32;  % spatial stride
+stride_tem=10;  % temporal stride
+size_tem=5;  % temporal length
+scale = 4;  % scale size
+blur_size = 2;
+
+filepaths = dir(fullfile(video_dir_path,'*.yuv'));  % YUV files
+%filepaths = filepaths(1:1);
+if ~exist('../../data/train')
+	mkdir('../../data/train');
+end
+
+alf = 0;  % frame index
+als = 0;  % volume index
+h_s = fix((video_size(1) - size_spa) / stride_spa) + 1; 
+w_s = fix((video_size(2) - size_spa) / stride_spa) + 1; 
+H = fspecial('gaussian', [5 5], blur_size);  % gaussian filter
+
+% H = lpfilter('gaussian', video_size(1), video_size(2), blur_size);
+
+data = cell(1, length(filepaths));
+fprintf('... %d video sequences\n', length(filepaths));
+for i = 1:length(filepaths)
+    filepath = fullfile(video_dir_path, filepaths(i).name);  % YUV file dir
+    file = dir(filepath);
+    numfrm = file.bytes / dim_s;
+    seq = fix((numfrm - size_tem) / stride_tem) + 1;
+    alf = alf + numfrm;
+    als = als + seq;
+    fprintf('blurring... the %d video sequences, ... %d frms\n', i, numfrm);
+    fid = fopen(filepath, 'r');
+    Y = zeros([numfrm, video_size]);  % luminance channel
+    X = zeros([numfrm, video_size]);
+    for j = 1:numfrm
+        y = fread(fid, video_size, 'uint8') ./ 255;
+        Y(j,:,:) = y;
+%         F = fft2(y);
+%         G = H.*F;
+%         g = abs(ifft2(G));
+        g = imfilter(y, H, 'corr', 'replicate');
+        g = imresize(imresize(g, 1/scale, 'bicubic'), scale, 'bicubic');
+        X(j,:,:) = g;
+        fread(fid, [video_size(1), video_size(2) / 2], 'uint8');  % Cb channel
+    end
+    fclose(fid);
+
+    data{i} = struct();
+    data{i}.seq = fix((numfrm - size_tem) / stride_tem) + 1;
+    data{i}.name = filepaths(i).name;
+    data{i}.data = X;
+    data{i}.origin = Y;
+end
+fprintf('...loading done, %d frms\n\nbeginning cropping frame\n', alf);
+fprintf('...all cropped number: %d\n', h_s * w_s * als);
+
+hr_data = zeros([h_s * w_s * als, size_tem, 1, size_spa, size_spa]);  % volumes * tem_size * channel * size_spa * size_spa
+lr_data = zeros([h_s * w_s * als, size_tem, 1, size_spa, size_spa]);
+lrs_data = zeros([h_s * w_s * als, size_tem, 1, size_spa/scale, size_spa/scale]);
+
+an = 1;  % frame index
+cn = 1;  % volume index
+for i = 1:length(data)
+    lr = data{i}.data;
+    hr = data{i}.origin;
+    seq = data{i}.seq;
+    for q = 1:seq
+
+        an = an + 1;
+        for j = 1:h_s
+            for k = 1:w_s
+               lr_c = lr((q-1)*stride_tem+1:(q-1)*stride_tem+size_tem,...
+                   (j-1)*stride_spa+1:(j-1)*stride_spa+size_spa,...
+                   (k-1)*stride_spa+1:(k-1)*stride_spa+size_spa);
+               hr_c = hr((q-1)*stride_tem+1:(q-1)*stride_tem+size_tem,...
+                   (j-1)*stride_spa+1:(j-1)*stride_spa+size_spa,...
+                   (k-1)*stride_spa+1:(k-1)*stride_spa+size_spa);
+               lrs_c = zeros([size_tem, size_spa/scale, size_spa/scale]);
+               for s = 1:size_tem
+                   hr_s = squeeze(hr_c(s,:,:));
+                   g_s = imfilter(hr_s, H, 'corr', 'replicate');
+                   g_s = imresize(g_s, 1/scale, 'bicubic');
+                   lrs_c(s,:,:) = g_s;
+               end
+               hr_data(cn, :, 1, :, :) = hr_c;
+               hr_data(h_s * w_s * als + cn, :, 1, :, :) = hr_c(:, end:-1:1, :);
+               hr_data(h_s * w_s * als * 2 + cn, :, 1, :, :) = hr_c(:, :, end:-1:1);
+               hr_data(h_s * w_s * als * 3 + cn, :, 1, :, :) = permute(hr_c(:, :, end:-1:1), [1 3 2]);
+               lr_data(cn, :, 1, :, :) = lr_c;
+               lr_data(h_s * w_s * als + cn, :, 1, :, :) = lr_c(:, end:-1:1, :);
+               lr_data(h_s * w_s * als * 2 + cn, :, 1, :, :) = lr_c(:, :, end:-1:1);
+               lr_data(h_s * w_s * als * 2 + cn, :, 1, :, :) = permute(lr_c(:, :, end:-1:1), [1 3 2]);
+               lrs_data(cn, :, 1, :, :) = lrs_c;
+               lrs_data(h_s * w_s * als + cn, :, 1, :, :) = lrs_c(:, end:-1:1, :);
+               lrs_data(h_s * w_s * als * 2 + cn, :, 1, :, :) = lrs_c(:, :, end:-1:1);
+               lrs_data(h_s * w_s * als * 2 + cn, :, 1, :, :) = permute(lrs_c(:, :, end:-1:1), [1 3 2]);
+               cn = cn + 1;
+            end
+        end
+    end
+    fprintf('crop with the %d sequence\n', i);
+end
+
+save(strcat('../data/train/', num2str(length(filepaths)), '_seq_', ...
+num2str(h_s * w_s * als * 3 ), '_yuv_scale_', num2str(scale), '_frm', num2str(size_tem), '_blur_', num2str(blur_size),'.mat'), ...
+'hr_data', 'lr_data', 'lrs_data', '-v7.3');
+
+fprintf('...make done\n');
